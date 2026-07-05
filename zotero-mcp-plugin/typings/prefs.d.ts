@@ -9,6 +9,8 @@ declare namespace _ZoteroTypes {
     PluginPrefsMap: {
       "mcp.server.enabled": boolean;
       "mcp.server.port": number;
+      "markitdown.enabled": boolean;
+      "markitdown.path": string;
     };
   }
 }

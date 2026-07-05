@@ -111,29 +111,51 @@ export class FulltextService {
 
       // Handle different attachment types
       if (this.isPDFAttachment(attachment, attachmentType)) {
-        // Use PDFProcessor directly for PDF files
+        // Prefer an existing Markdown conversion (created by markitdown) next
+        // to the PDF. This path is hit in bulk during fulltext search, so no
+        // new conversions are started and no notifications are shown here.
         try {
-          const { PDFProcessor } = await import('./pdfProcessor');
-          const { TextFormatter } = await import('./textFormatter');
-          const processor = new PDFProcessor(ztoolkit);
-          
+          const { markitdownService } = await import('./markitdownService');
           const filePath = attachment.getFilePath();
           if (filePath) {
-            try {
-              const rawText = await processor.extractText(filePath);
-              content = TextFormatter.formatPDFText(rawText);
-              extractionMethod = 'pdf_processor';
-            } catch (fileError) {
-              ztoolkit.log(`[FulltextService] PDF file not accessible at path: ${filePath} - ${fileError}`, "warn");
-            } finally {
-              processor.terminate();
+            const markdown = await markitdownService.getMarkdownForPDF(filePath, {
+              convertIfMissing: false,
+              notify: false,
+            });
+            if (markdown) {
+              content = markdown.markdown;
+              extractionMethod = 'markitdown_markdown';
             }
-          } else {
-            ztoolkit.log(`[FulltextService] No file path available for PDF attachment ${attachment.key}`, "warn");
           }
-        } catch (pdfError) {
-          ztoolkit.log(`[FulltextService] PDF extraction failed for ${attachment.key}: ${pdfError}`, "warn");
-          content = '';
+        } catch (mdError) {
+          ztoolkit.log(`[FulltextService] Markdown lookup failed for ${attachment.key}: ${mdError}`, "warn");
+        }
+
+        // Use PDFProcessor directly for PDF files
+        if (!content) {
+          try {
+            const { PDFProcessor } = await import('./pdfProcessor');
+            const { TextFormatter } = await import('./textFormatter');
+            const processor = new PDFProcessor(ztoolkit);
+
+            const filePath = attachment.getFilePath();
+            if (filePath) {
+              try {
+                const rawText = await processor.extractText(filePath);
+                content = TextFormatter.formatPDFText(rawText);
+                extractionMethod = 'pdf_processor';
+              } catch (fileError) {
+                ztoolkit.log(`[FulltextService] PDF file not accessible at path: ${filePath} - ${fileError}`, "warn");
+              } finally {
+                processor.terminate();
+              }
+            } else {
+              ztoolkit.log(`[FulltextService] No file path available for PDF attachment ${attachment.key}`, "warn");
+            }
+          } catch (pdfError) {
+            ztoolkit.log(`[FulltextService] PDF extraction failed for ${attachment.key}: ${pdfError}`, "warn");
+            content = '';
+          }
         }
       } else if (attachmentType && (
         attachmentType.includes('html') || 

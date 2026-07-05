@@ -8,6 +8,7 @@
  */
 
 import { PDFProcessor } from "./pdfProcessor";
+import { markitdownService } from "./markitdownService";
 import { MCPSettingsService } from "./mcpSettingsService";
 import { IntelligentContentProcessor, ContentControl, ProcessingResult } from "./intelligentContentProcessor";
 import { TextFormatter } from "./textFormatter";
@@ -277,7 +278,7 @@ export class UnifiedContentExtractor {
 
       // Convert HTML to well-formatted text using user settings
       const settings = MCPSettingsService.getEffectiveSettings();
-      let plainText = TextFormatter.htmlToText(noteText, {
+      const plainText = TextFormatter.htmlToText(noteText, {
         preserveParagraphs: settings.preserveFormatting,
         preserveHeadings: settings.preserveHeadings,
         preserveLists: settings.preserveLists,
@@ -395,12 +396,15 @@ export class UnifiedContentExtractor {
 
     let content = '';
     let extractionMethod = 'unknown';
+    let markdownPath: string | undefined;
 
     try {
       // Unified extraction logic based on file type
       if (this.isPDF(attachment, contentType)) {
-        content = await this.extractPDFText(filePath, attachment.id);
-        extractionMethod = 'pdf_cached_or_extracted';
+        const pdfResult = await this.extractPDFText(filePath, attachment.id);
+        content = pdfResult.text;
+        extractionMethod = pdfResult.method;
+        markdownPath = pdfResult.markdownPath;
       } else if (this.isHTML(contentType)) {
         content = await this.extractHTMLText(filePath);
         extractionMethod = 'html_parsing';
@@ -434,7 +438,7 @@ export class UnifiedContentExtractor {
         finalContent = this.smartTruncate(finalContent, modeConfig.maxContentLength);
       }
 
-      const result = {
+      const result: any = {
         attachmentKey: attachment.key,
         filename,
         filePath,
@@ -447,6 +451,11 @@ export class UnifiedContentExtractor {
         extractionMethod,
         extractedAt: new Date().toISOString()
       };
+
+      if (markdownPath) {
+        result.markdownPath = markdownPath;
+        result.notice = 'Content was read from a Markdown conversion (markitdown) of the PDF, not from the PDF directly.';
+      }
 
       // Add intelligent processing metadata if used
       if (processedResult) {
@@ -504,14 +513,30 @@ export class UnifiedContentExtractor {
   }
 
   /**
-   * Extract text from PDF - first try Zotero cache, then fallback to PDFProcessor
+   * Extract text from PDF - first try a Markdown conversion (markitdown),
+   * then Zotero's fulltext cache, then fallback to PDFProcessor
    */
-  private async extractPDFText(filePath: string, attachmentId?: number): Promise<string> {
-    // First try Zotero's cached fulltext (much faster)
+  private async extractPDFText(
+    filePath: string,
+    attachmentId?: number,
+  ): Promise<{ text: string; method: string; markdownPath?: string }> {
+    // Prefer a Markdown version of the PDF (existing .md next to the PDF, or
+    // freshly converted via markitdown). Falls through silently when
+    // markitdown is unavailable or the conversion fails.
+    const markdown = await markitdownService.getMarkdownForPDF(filePath);
+    if (markdown) {
+      return {
+        text: markdown.markdown,
+        method: 'markitdown_markdown',
+        markdownPath: markdown.mdPath,
+      };
+    }
+
+    // Then try Zotero's cached fulltext (much faster than extraction)
     if (attachmentId) {
       const cachedText = await this.getZoteroCachedFulltext(attachmentId);
       if (cachedText) {
-        return TextFormatter.formatPDFText(cachedText);
+        return { text: TextFormatter.formatPDFText(cachedText), method: 'pdf_cached_or_extracted' };
       }
     }
 
@@ -520,12 +545,15 @@ export class UnifiedContentExtractor {
     try {
       ztoolkit.log(`[UnifiedContentExtractor] Fallback to PDFProcessor for: ${filePath}`);
       const rawText = await processor.extractText(filePath);
-      return TextFormatter.formatPDFText(rawText);
+      return { text: TextFormatter.formatPDFText(rawText), method: 'pdf_cached_or_extracted' };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       ztoolkit.log(`[UnifiedContentExtractor] PDF extraction failed: ${errorMsg}`, "warn");
       if (errorMsg.includes('timed out')) {
-        return `[PDF extraction timed out - file may be too large. Try indexing the PDF in Zotero first.]`;
+        return {
+          text: `[PDF extraction timed out - file may be too large. Try indexing the PDF in Zotero first.]`,
+          method: 'pdf_cached_or_extracted',
+        };
       }
       throw error;
     } finally {
@@ -637,7 +665,8 @@ export class UnifiedContentExtractor {
 
     if (result.content.attachments) {
       for (const att of result.content.attachments) {
-        textParts.push(`ATTACHMENT (${att.filename || att.type}):\n${att.content}\n`);
+        const notice = att.notice ? `[${att.notice}]\n` : '';
+        textParts.push(`ATTACHMENT (${att.filename || att.type}):\n${notice}${att.content}\n`);
       }
     }
 
